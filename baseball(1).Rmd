@@ -1,0 +1,314 @@
+---
+title: "Baseball"
+author: "Hanying Ji; Jiaqian Yu"
+date: "2018/4/19"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##Setting Environment
+```{r,warning=FALSE,message=FALSE}
+library(Lahman)
+library(dplyr)
+library(tidyr)
+library(MASS)
+library(gamlss)
+```
+
+##Data Preparation
+Our dataset is from package "Lahman" in R, providing the tables from the "Sean Lahman Baseball Database"
+```{r}
+# Define pitchers: Those players whose total amounts of pitch > 3
+pitchers <-Pitching %>%
+  group_by(playerID) %>%
+  summarize(gamesPitched=sum(G)) %>%
+  filter(gamesPitched>3)
+
+#collect data of batters from 2000 to 2016
+info<-Batting %>%
+  filter(AB>0,yearID%in%c(2000:2016)) %>%
+  anti_join(pitchers, by="playerID") 
+
+info<-info%>%
+  dplyr::select(playerID, AB, H) %>%
+  group_by(playerID) %>%
+  summarize(Hits=sum(H),AtBats=sum(AB))%>%
+  mutate(BattingAvg=Hits/AtBats) 
+
+# add batters' names and hand preferance for batting
+allinfo<-Master %>%
+  tbl_df() %>%
+  dplyr::select(playerID, nameFirst, nameLast, bats) %>%
+  unite(name, nameFirst, nameLast, sep = " ") %>%
+  inner_join(info, by="playerID")
+head(allinfo)
+```
+
+# Model 1
+```{r}
+# lowest BattingAvg
+head(allinfo[order(allinfo$BattingAvg,decreasing = TRUE),])
+# highest BattingAvg
+head(allinfo[order(allinfo$BattingAvg,decreasing = FALSE),])
+```
+
+
+# Model 2
+```{r}
+set.seed(1)
+alpha<-seq(1,200,1)
+beta<-367*alpha/133
+pbeta(0.3,alpha,beta)
+```
+
+
+```{r}
+alpha0<-126
+beta0<-347.6842
+set.seed(1)
+df<-data.frame(x=rbeta(1000,alpha0,beta0))
+library(ggplot2)
+ggplot(df,aes(df$x))+
+  stat_function(fun=dbeta,args=list(alpha0,beta0),color="red")+
+  xlim(0,0.5)+
+  xlab("x")+
+  ylab("Density of Beta(119,328)")
+allinfo$alpha1<-alpha0+allinfo$Hits
+allinfo$beta1<-beta0+allinfo$AtBats-allinfo$Hits
+allinfo$BattingAvg_post<-allinfo$alpha1/(allinfo$alpha1+allinfo$beta1)
+# lowest BattingAvg_post
+head(allinfo[order(allinfo$BattingAvg_post,decreasing = TRUE),])
+# highest BattingAvg_post
+head(allinfo[order(allinfo$BattingAvg_post,decreasing = FALSE),])
+```
+```{r}
+Top5<- allinfo[order(allinfo$BattingAvg_post,decreasing = TRUE),][1:5,]$playerID
+Top5_old<-allinfo[order(allinfo$BattingAvg,decreasing = TRUE),][1:5,]$playerID
+# Tail5<-allinfo[order(allinfo$BattingAvg_post,decreasing = FALSE),][1:5,]$playerID
+Top5info <- allinfo %>%
+   filter(playerID %in% c(Top5,Top5_old))
+
+library(broom)
+five <- Top5info %>%
+   tidyr::crossing(x = seq(.18, .4, .0002)) %>%
+   ungroup() %>%
+   mutate(density = dbeta(x, alpha1, beta1))
+ggplot(five) +
+  geom_line(aes(x, density,color=name)) +
+  stat_function(fun = function(x) dbeta(x, alpha0, beta0),
+                lty = 2, color = "black")
+```
+
+
+
+```{r}
+ggplot(data=allinfo)+
+  geom_point(mapping=aes(BattingAvg,BattingAvg_post,colour=AtBats))+
+  scale_colour_gradientn(colours = blues9)+
+  geom_hline(yintercept = alpha0/(alpha0+beta0))+
+  geom_abline(slope=1,color="blue")
+```
+
+There are a lot of method to fit a probability distribution from data in R. We???ll use the fitdistr function from MASS
+```{r,warning=FALSE}
+# filter players
+allinfo_filtered<-allinfo %>% filter(AtBats>=500)
+# use the filtered data to fit the empirical Bayes estimation - a Beta prior
+mle<-MASS::fitdistr(allinfo_filtered$BattingAvg, dbeta,
+                  start = list(shape1 = 1, shape2 = 10))
+alpha0_eb<-mle$estimate[1]
+beta0_eb<-mle$estimate[2]
+miu0_eb<-alpha0_eb/(alpha0_eb+beta0_eb)
+
+ggplot(data=allinfo_filtered)+
+  geom_histogram(binwidth = 0.005,aes(x=BattingAvg,y=..density..))+
+  stat_function(fun = function(x) dbeta(x, alpha0_eb, beta0_eb), color = "red",size = 1)+
+  labs(title="Prior distribution")
+```
+Then, for each player, they all have their Empericical Bayesian estimators for their BattingAvg based on the prior distribution given by the representative players
+```{r}
+allinfo<-allinfo%>%
+  mutate(EB_BattingAvg_post=(Hits+alpha0_eb)/(AtBats+alpha0_eb+beta0_eb))
+```
+
+```{r}
+# lowest EB estimator BattingAvg
+head(allinfo[order(allinfo$EB_BattingAvg_post,decreasing = TRUE),])
+# highest EB estimator BattingAvg
+head(allinfo[order(allinfo$EB_BattingAvg_post,decreasing = FALSE),])
+```
+As we can see, the Empricial Bayes didn't simply choose those players who only have one or two bats, instead, players with large amount of AtBats were chosen.
+
+
+```{r}
+career_eb <- allinfo %>%
+  mutate(eb_estimate = (Hits + alpha0_eb) / (AtBats + alpha0_eb + beta0_eb))%>%
+  mutate(alpha1_eb = Hits + alpha0_eb,
+           beta1_eb = AtBats - Hits + beta0_eb)%>%
+  dplyr::select(playerID,name,Hits,AtBats,BattingAvg,eb_estimate,alpha1_eb,beta1_eb)
+
+
+career_eb <- career_eb %>%
+    mutate(low = qbeta(.025, alpha1_eb, beta1_eb),
+           high = qbeta(.975, alpha1_eb, beta1_eb))
+
+set.seed(2018)
+
+some <- career_eb %>%
+    sample_n(20) %>%
+    mutate(name = paste0(name, " (", Hits, "/", AtBats, ")"))
+
+frequentist <- some %>%
+    group_by(playerID, name, AtBats) %>%
+    do(tidy(binom.test(.$Hits, .$AtBats))) %>%
+    dplyr::select(playerID, name, estimate, low = conf.low, high = conf.high) %>%
+    mutate(method = "Confidence")
+
+bayesian <- some %>%
+    dplyr::select(playerID, name, AtBats, estimate = eb_estimate,
+           low = low, high = high) %>%
+    mutate(method = "Credible")
+
+combined <- bind_rows(frequentist, bayesian)
+
+combined %>%
+    #mutate(name = reorder(name, -AtBats)) %>%
+    ggplot(aes(estimate, name, color = method, group = method)) +
+    geom_point() +
+    geom_errorbarh(aes(xmin = low, xmax = high)) +
+    geom_vline(xintercept = alpha0_eb / (alpha0_eb + beta0_eb), color = "red", lty = 2) +
+    xlab("Estimated batting average") +
+    ylab("Player") +
+    labs(color = "")
+```
+
+
+#Model 3
+```{r}
+library(ggplot2)
+allinfo %>%
+  filter(AtBats >= 20) %>%
+  ggplot(aes(AtBats, BattingAvg)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  scale_x_log10()
+```
+
+```{r}
+#fit the initial model
+fit <- gamlss(cbind(Hits, AtBats - Hits) ~ log(AtBats),
+              data = allinfo,
+              family = BB(mu.link = "identity"))
+library(broom)
+td <- tidy(fit)
+td
+```
+```{r}
+#calculate some prior dist
+u0 <- 0.1517
+lamda <- 0.0143
+sigma0 <- 0.0012
+u1 <- u0+lamda*log(1)
+u2 <- u0+lamda*log(10)
+u3 <- u0+lamda*log(100)
+u4 <- u0+lamda*log(1000)
+u5 <- u0+lamda*log(10000)
+
+a1 <- u1/sigma0
+a2 <- u2/sigma0
+a3 <- u3/sigma0
+a4 <- u4/sigma0
+a5 <- u5/sigma0
+b1 <- (1-u1)/sigma0
+b2 <- (1-u2)/sigma0
+b3 <- (1-u3)/sigma0
+b4 <- (1-u4)/sigma0
+b5 <- (1-u5)/sigma0
+
+df<-data.frame(x=seq(0.1,0.4,1000))
+ggplot(df,aes(df$x),col())+
+  stat_function(fun = dbeta,args=list(a1,b1), color = "red",size = 1)+
+  stat_function(fun = dbeta,args=list(a2,b2), color = "yellow",size = 1)+
+  stat_function(fun = dbeta,args=list(a3,b3), color = "green",size = 1)+
+  stat_function(fun = dbeta,args=list(a4,b4), color = "blue",size = 1)+
+  stat_function(fun = dbeta,args=list(a5,b5), color = "purple",size = 1)+
+    xlim(0.1,0.4)+
+  labs(title="Updated Prior distribution",x="Batting Average",y="Prior Density")
+```
+
+
+
+#Model 4
+```{r}
+#left hand and right hand
+career2 <- allinfo %>%
+  filter(!is.na(bats)) %>%
+  mutate(bats = relevel(bats,"R"))
+
+fit2 <- gamlss(cbind(Hits,AtBats-Hits)~log(AtBats)+bats,
+               data=career2,
+               family=BB(mu.link="identity"))
+tidy(fit2)
+```
+
+```{r}
+#calculate some prior dist
+u0 <- 0.1514
+lamda <- 0.0143
+phi <- 0.0017
+sigma0 <- 0.0012
+BattingHand <- c(1,0,1,0,1,0,1,0,1,0)
+AB <- c(1,10,100,1000,10000)
+
+u1l <- u0+lamda*log(1)+phi*1
+u1r <- u0+lamda*log(1)+phi*0
+u2l <- u0+lamda*log(10)+phi*1
+u2r <- u0+lamda*log(10)+phi*0
+u3l <- u0+lamda*log(100)+phi*1
+u3r <- u0+lamda*log(100)+phi*0
+u4l <- u0+lamda*log(1000)+phi*1
+u4r <- u0+lamda*log(1000)+phi*0
+u5l <- u0+lamda*log(10000)+phi*1
+u5r <- u0+lamda*log(10000)+phi*0
+a1l <- u1l/sigma0
+a1r <- u1r/sigma0
+a2l <- u2l/sigma0
+a2r <- u2r/sigma0
+a3l <- u3l/sigma0
+a3r <- u3r/sigma0
+a4l <- u4l/sigma0
+a4r <- u4r/sigma0
+a5l <- u5l/sigma0
+a5r <- u5r/sigma0
+
+
+
+b1l <- (1-u1l)/sigma0
+b1r <- (1-u1r)/sigma0
+b2l <- (1-u2l)/sigma0
+b2r <- (1-u2r)/sigma0
+b3l <- (1-u3l)/sigma0
+b3r <- (1-u3r)/sigma0
+b4l <- (1-u4l)/sigma0
+b4r <- (1-u4r)/sigma0
+b5l <- (1-u5l)/sigma0
+b5r <- (1-u5r)/sigma0
+
+df<-data.frame(x=seq(0.1,0.35,1000))
+ggplot(df,aes(df$x))+
+  stat_function(fun = dbeta,args=list(a1l,b1l), color = "red",size = 1)+
+  stat_function(fun = dbeta,args=list(a2l,b2l), color = "yellow",size = 1)+
+  stat_function(fun = dbeta,args=list(a3l,b3l), color = "green",size = 1)+
+  stat_function(fun = dbeta,args=list(a4l,b4l), color = "blue",size = 1)+
+  stat_function(fun = dbeta,args=list(a5l,b5l), color = "purple",size = 1)+
+  stat_function(fun = dbeta,args=list(a1r,b1r), color = "red",size = 1,linetype="dashed")+
+  stat_function(fun = dbeta,args=list(a2r,b2r), color = "yellow",size = 1,linetype="dashed")+
+  stat_function(fun = dbeta,args=list(a3r,b3r), color = "green",size = 1,linetype="dashed")+
+  stat_function(fun = dbeta,args=list(a4r,b4r), color = "blue",size = 1,linetype="dashed")+
+  stat_function(fun = dbeta,args=list(a5r,b5r), color = "purple",size = 1,linetype="dashed")+
+    xlim(0.1,0.35)+
+  labs(title="Updated Prior distribution",x="Batting Average",y="Prior Density")
+```
