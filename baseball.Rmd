@@ -112,7 +112,7 @@ ggplot(data=allinfo)+
   geom_abline(slope=1,color="blue")
 ```
 
-There are a lot of method to fit a probability distribution from data in R. We???ll use the fitdistr function from MASS
+There are a lot of method to fit a probability distribution from data in R. We'll use the fitdistr function from MASS
 ```{r,warning=FALSE}
 # filter players
 allinfo_filtered<-allinfo %>% filter(AtBats>=500)
